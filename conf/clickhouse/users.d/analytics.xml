@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<!--
+  Analitik profil ayarlari.
+
+  NOT: Iceberg/DataLakeCatalog ile ilgili "allow_experimental_*" bayraklari
+  BILEREK buraya konmadi. ClickHouse surumden surume bu ayarlarin adini
+  degistiriyor / stable'a alip kaldiriyor. users.d icinde TANINMAYAN bir
+  ayar varsa ClickHouse ACILISTA CRASH eder ve tum stack ayaga kalkmaz.
+  Bunun yerine ilgili SET komutlari sql/clickhouse/01_catalog.sql icinde
+  oturum seviyesinde veriliyor - orada hata verirse sadece o sorgu duser.
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- Lakehouse sorgulari S3'ten cekerken paralellik onemli -->
+            <max_threads>8</max_threads>
+            <max_download_threads>8</max_download_threads>
+
+            <!-- Uzak storage okumasi icin optimize edilmis okuma metodu -->
+            <remote_filesystem_read_method>threadpool</remote_filesystem_read_method>
+            <remote_filesystem_read_prefetch>1</remote_filesystem_read_prefetch>
+
+            <!-- Test senaryolarinda tekrarli sorgu suresi olcecegiz;
+                 cache'i acikca acip kapatabilmek icin varsayilani belirtiyoruz -->
+            <use_query_cache>0</use_query_cache>
+
+            <max_memory_usage>6000000000</max_memory_usage>
+            <max_execution_time>300</max_execution_time>
+        </default>
+    </profiles>
+
+    <users>
+        <default>
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+        </default>
+
+        <!--
+          Analitik kullanici.
+
+          NEDEN BURADA, CLICKHOUSE_USER env'i ile DEGIL?
+          Entrypoint, CLICKHOUSE_USER gorunce bu dizine default-user.xml
+          YAZMAYA calisir. Dizin :ro mount edildigi icin container
+          "Read-only file system" ile exit 1 verir. Kullaniciyi burada
+          tanimlayinca hem dizin read-only kalabiliyor hem de kullanici
+          tanimi surum kontrolunde oluyor; ortamlar arasi surpriz kalmiyor.
+
+          NOT: XML yorumlarinin icinde cift tire KULLANILAMAZ. ClickHouse
+          config'i SAX ile ayristirir ve "Invalid token" verip ACILISTA
+          CRASH eder. Yorum yazarken dikkat.
+
+          Parola from_env ile .env'den okunuyor; repoda duz metin parola
+          tutulmuyor.
+        -->
+        <analytics>
+            <password from_env="CH_PASSWORD"/>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+            <show_named_collections>1</show_named_collections>
+            <show_named_collections_secrets>0</show_named_collections_secrets>
+        </analytics>
+    </users>
+</clickhouse>

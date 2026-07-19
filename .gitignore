@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+spark-warehouse/
+derby.log
+metastore_db/
+out/
+*.log
+.DS_Store
+
+# Kimlik bilgileri iceriyor -- commit EDILMEZ.
+# docs/01-mimari.md bolum 8 bunu acikca sart kosuyor; .gitignore'da
+# olmamasi o kurala aykiriydi. Paylasilacak surum: .env.example
+.env
+
+# nessie-gc jar'i (~126MB, run.ps1 gc otomatik indirir)
+tools/

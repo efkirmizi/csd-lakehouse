@@ -1,0 +1,423 @@
+# =============================================================================
+#  CSD Data Lakehouse - Lokal Referans Ortami
+# =============================================================================
+#  Katmanlar:
+#    postgres    -> OLTP kaynak sistem simulasyonu (ilişkisel, satir-bazli)
+#    minio       -> Object storage, S3 API. Fiziksel veri (Parquet) burada.
+#    nessie      -> Katalog + versiyonlama. IKI cephesi var:
+#                     :19120/api/v2      -> Spark'in konustugu native API
+#                     :19120/iceberg/... -> ClickHouse'un konustugu Iceberg REST
+#    spark-*     -> ETL motoru (PySpark)
+#    clickhouse  -> OLAP servis katmani
+#
+#  Port haritasi (host tarafi - cakisma olmayacak sekilde secildi):
+#    5432  postgres        8123  clickhouse HTTP     9000  minio API
+#    7077  spark master    9002  clickhouse native   9001  minio console
+#    8080  spark master UI 19120 nessie              8081  spark worker UI
+#    8888  jupyter (opsiyonel: --profile notebook)
+# =============================================================================
+
+name: csd-lakehouse
+
+# --- Spark servisleri icin ortak blok (YAML anchor - tekrari onler) ---
+x-spark-common: &spark-common
+  build:
+    context: ./docker/spark
+    args:
+      SPARK_VERSION: ${SPARK_VERSION}
+      ICEBERG_VERSION: ${ICEBERG_VERSION}
+      NESSIE_VERSION: ${NESSIE_VERSION}
+      PG_JDBC_VERSION: ${PG_JDBC_VERSION}
+  image: csd/spark-iceberg:${SPARK_VERSION}-ice${ICEBERG_VERSION}
+  environment: &spark-env
+    # Iceberg S3FileIO ve AWS SDK bu uc degiskeni okur
+    AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    AWS_REGION: ${AWS_REGION}
+    # Job'larin okudugu uygulama seviyesi degiskenler
+    NESSIE_URI: ${NESSIE_URI}
+    WAREHOUSE: s3://${LAKEHOUSE_BUCKET}/warehouse
+    S3_ENDPOINT: http://minio:9000
+    PG_URL: jdbc:postgresql://postgres:5432/${PG_DB}
+    PG_USER: ${PG_USER}
+    PG_PASSWORD: ${PG_PASSWORD}
+  volumes:
+    - ./jobs:/opt/spark/jobs:ro
+    - ./tests:/opt/spark/tests:ro
+    - ./conf/spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    # Uretilen ciktilar (ornegin ClickHouse gorunum DDL'i). Yazilabilir olmali.
+    - ./out:/opt/spark/out
+  networks: [lakehouse]
+
+services:
+
+  # ==========================================================================
+  #  1. OLTP KAYNAK SISTEM
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: lh-postgres
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_DB}
+      OLTP_ISLEM_ROWS: ${OLTP_ISLEM_ROWS}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./sql/postgres:/docker-entrypoint-initdb.d:ro
+    # Seed sirasinda 2M satir uretiliyor; WAL ve bellek biraz genisletildi.
+    command: >
+      postgres
+      -c shared_buffers=512MB
+      -c max_wal_size=4GB
+      -c checkpoint_timeout=30min
+      -c wal_level=logical
+    healthcheck:
+      # -h 127.0.0.1 SART. Aciklamasi:
+      #
+      # Postgres entrypoint, initdb scriptlerini (00_, 01_) calistirirken
+      # sunucuyu listen_addresses='' ile baslatir -- yani SADECE unix
+      # socket'ten erisilir, TCP KAPALIDIR. Init bitince sunucuyu TCP'ye
+      # acarak yeniden baslatir.
+      #
+      # 'pg_isready -U csd' host belirtmedigi icin unix socket'ten baglanir
+      # ve init sirasinda BASARILI doner. Compose "healthy" isaretler,
+      # Nessie baslar, TCP'den baglanmaya calisir ve
+      # "Connection refused" alip exit 1 verir. (Bu tam olarak yasandi.)
+      #
+      # -h 127.0.0.1 vererek TCP'yi zorluyoruz: init suresince healthcheck
+      # dogru sekilde BASARISIZ olur, ancak gercekten hazir olunca healthy
+      # isaretlenir.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${PG_USER} -d ${PG_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      # start_period COMERT olmali. Seed suresi OLTP_ISLEM_ROWS ile dogru
+      # orantili buyur: 2M ~1dk, 20M ~15-30dk (bakiye agregasyonu diske
+      # tastikca uzar). Bu sure boyunca Postgres TCP'yi dinlemez (bkz.
+      # yukaridaki -h 127.0.0.1 notu), yani healthcheck basarisiz olur.
+      # Pencere kisa olursa container 'unhealthy' isaretlenir ve ona bagli
+      # TUM servisler baslamaz:
+      #     dependency failed to start: container lh-postgres is unhealthy
+      #
+      # BU TUZAGA IKI KEZ DUSTUK: once 120s, sonra 900s -- 20M'de ikisi de
+      # yetmedi (bakiye GROUP BY'i diske tasip 20+dk surdu). Butce simdi:
+      #     start_period 1800s + retries 40 x interval 10s = ~40dk
+      # 01_init_oltp.sql'e eklenen work_mem artimi bakiye adimini
+      # hizlandirir; bu pencere de guvenli bir tampon birakir.
+      #
+      # ONEMLI: start_period saglikli olmayi GECIKTIRMEZ. Ilk basarili kontrol
+      # aninda healthy isaretlenir; bu sure yalnizca basarisizliklarin
+      # sayilmadigi bir muhlettir. Comert vermek 2M senaryosunu YAVASLATMAZ.
+      #
+      # NOT (donanim): 20M seed diski agir yorar. Zayif bir diskte / dusuk
+      # RAM'de bakiye agregasyonu Docker Desktop'i dahi dusurebilir (yasadik).
+      # 20M icin: SSD + >=8GB Docker RAM onerilir. Varsayilan 2M her yerde
+      # sorunsuz calisir; README'deki performans rakamlari 20M'den.
+      start_period: 1800s
+    networks: [lakehouse]
+
+  # ==========================================================================
+  #  2. OBJECT STORAGE
+  # ==========================================================================
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: lh-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_DOMAIN: minio
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web konsol -> http://localhost:9001
+    volumes:
+      - minio-data:/data
+    networks: [lakehouse]
+
+  # Bucket olusturur ve versiyonlamayi acar. Isi bitince exit 0 der.
+  # healthcheck yerine retry-loop kullaniyoruz: MinIO imajinda curl garanti
+  # degil, bu yontem imaj icerigine bagimli degil.
+  minio-init:
+    image: minio/mc:latest
+    container_name: lh-minio-init
+    depends_on: [minio]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      LAKEHOUSE_BUCKET: ${LAKEHOUSE_BUCKET}
+    entrypoint: >
+      /bin/sh -c "
+      echo 'MinIO bekleniyor...';
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; do
+        sleep 2;
+      done;
+      mc mb --ignore-existing local/$${LAKEHOUSE_BUCKET};
+      mc version enable local/$${LAKEHOUSE_BUCKET};
+      echo 'Bucket hazir: $${LAKEHOUSE_BUCKET}';
+      mc ls local;
+      "
+    networks: [lakehouse]
+
+  # ==========================================================================
+  #  3. KATALOG + VERSIYONLAMA
+  # ==========================================================================
+  nessie:
+    image: ghcr.io/projectnessie/nessie:${NESSIE_VERSION}
+    container_name: lh-nessie
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    ports:
+      - "19120:19120"
+    environment:
+      # --- Version store: commit gecmisi (branch/tag/commit) burada tutulur ---
+      #
+      # JDBC -> PostgreSQL secildi. ROCKSDB DEGIL. Iki gerekce:
+      #
+      #  1. ROCKSDB, named volume'a yazmaya calisirken "Permission denied"
+      #     verir: volume root'a ait olusur, Nessie root olmayan kullaniciyla
+      #     calisir. Cozumu container'i root'a acmaktir; kurumsal guvenlik
+      #     incelemesinde ilk takilacak sey de budur.
+      #  2. ROCKSDB tek node'a baglar. JDBC ile Nessie yatay olceklenebilir
+      #     ve metadata gercek bir veritabaninda durur -> yedekleme, HA,
+      #     point-in-time recovery hazir gelir.
+      #
+      # Uretimde: buradaki Postgres yerine HA (replikali) bir Postgres.
+      # Baska secenek: DYNAMODB / MONGODB / CASSANDRA.
+      NESSIE_VERSION_STORE_TYPE: JDBC
+      NESSIE_VERSION_STORE_PERSIST_JDBC_DATASOURCE: postgresql
+      QUARKUS_DATASOURCE_POSTGRESQL_JDBC_URL: jdbc:postgresql://postgres:5432/nessie
+      QUARKUS_DATASOURCE_POSTGRESQL_USERNAME: ${PG_USER}
+      QUARKUS_DATASOURCE_POSTGRESQL_PASSWORD: ${PG_PASSWORD}
+
+      # --- Iceberg REST Catalog cephesi (ClickHouse bunu kullanacak) ---
+      #
+      # Bu bolumun ayarlari BILEREK burada degil, su dosyada:
+      #     conf/nessie/application.properties
+      # Sebep: S3 kimlik bilgisi bir "secret referansi" ile verilir ve
+      # referansin yolu ortam degiskeniyle ifade EDILEMEZ (tire/nokta
+      # belirsizligi). Ayrintili aciklama o dosyanin basinda.
+      #
+      # Nessie'nin IKI ayri S3 tuketicisi oldugunu unutmayin:
+      #   1. Spark  -> kendi kimlik bilgisiyle S3'e KENDISI baglanir
+      #                (jobs/common/session.py icindeki s3.access-key-id)
+      #   2. Nessie -> REST katalog cephesi icin KENDI baglantisini kurar
+      # Spark'in calismasi (2)'nin calistigi anlamina GELMEZ. Bu tuzaga
+      # tam olarak dustuk: pipeline sorunsuz calisirken ClickHouse
+      # tablolari goremedi.
+
+      QUARKUS_HTTP_PORT: "19120"
+      QUARKUS_LOG_LEVEL: INFO
+    volumes:
+      # Quarkus bu yolu otomatik okur: /deployments/config/application.properties
+      - ./conf/nessie/application.properties:/deployments/config/application.properties:ro
+    # Nessie, Postgres'e baglanamazsa fail-fast davranir (dogru tercih).
+    #
+    # DIKKAT -- 'on-failure:5' BURADA YETMEZ, yasayarak ogrendik:
+    #
+    #   Yukaridaki 'depends_on: postgres: service_healthy' SADECE
+    #   'docker compose up' sirasinda gecerlidir. Docker daemon'i yeniden
+    #   baslattiginda (Docker Desktop kapanip acildiginda, makine yeniden
+    #   basladiginda) container'lari RESTART POLITIKASI ile ayaga kaldirir
+    #   ve depends_on kosullarini DIKKATE ALMAZ. Yani Nessie, Postgres
+    #   hazir olmadan baslar.
+    #
+    #   Nessie fail-fast oldugu icin her deneme ~2 saniyede biter; 5 deneme
+    #   ilk ~30 saniyede tukenir. Oysa 20M satirlik bir veritabaninda
+    #   Postgres'in WAL kurtarmasi 35 SANIYE surdu:
+    #       "FATAL: the database system is not yet accepting connections
+    #        Detail: Consistent recovery state has not been yet reached."
+    #   Sonuc: Nessie hakkini doldurup oldu, stack yarim ayaga kalkti --
+    #   Spark ve ClickHouse ayakta, katalog YOK.
+    #
+    #   'unless-stopped' sinirsiz dener (Docker gecikmeyi kademeli artirir),
+    #   boylece Postgres ne kadar surerse sursun Nessie yakalar. Kullanici
+    #   acikca durdurursa durmus kalir -- 'always'den farki ve tercih sebebi.
+    restart: unless-stopped
+    networks: [lakehouse]
+
+  # ==========================================================================
+  #  4. ISLEME KATMANI (Spark standalone cluster)
+  # ==========================================================================
+  spark-master:
+    <<: *spark-common
+    container_name: lh-spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      <<: *spark-env
+      SPARK_MASTER_HOST: spark-master
+      SPARK_NO_DAEMONIZE: "true"
+    ports:
+      - "7077:7077"   # cluster submit portu
+      - "8080:8080"   # Master UI -> http://localhost:8080
+    depends_on:
+      nessie:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  spark-worker:
+    <<: *spark-common
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_CORES: "4"
+      SPARK_WORKER_MEMORY: "4g"
+      SPARK_NO_DAEMONIZE: "true"
+    ports:
+      - "8081-8083:8081"   # worker UI araligi (docker compose up --scale ile cogaltilabilir)
+    depends_on: [spark-master]
+
+  # Opsiyonel kesif/demo arayuzu:  docker compose --profile notebook up -d
+  jupyter:
+    <<: *spark-common
+    container_name: lh-jupyter
+    profiles: [notebook]
+    user: root
+    environment:
+      <<: *spark-env
+      # PYTHONPATH SART. Imajda pyspark var (/opt/spark/python) ama sadece
+      # spark-submit onu PYTHONPATH'e ekler. Notebook kernel'i duz 'python'
+      # oldugu icin goremez ve ilk hucre su hatayla duser:
+      #     ModuleNotFoundError: No module named 'pyspark'
+      # (Bu tuzaga dustuk.) py4j surumu Spark surumune baglidir; Spark'i
+      # yukseltirseniz asagidaki zip adini da guncelleyin.
+      PYTHONPATH: /opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip
+      # Executor'lar driver'a (bu container) geri baglanacak; ismi bilmeli.
+      SPARK_DRIVER_HOST: lh-jupyter
+      SPARK_LOCAL_HOSTNAME: lh-jupyter
+    # DIKKAT -- YAML '>' KATLAMA TUZAGI:
+    # '>' bloklarinda newline'lar boslugua donusur AMA ilk satirdan DAHA
+    # FAZLA girintili satirlarin newline'i KORUNUR. Onceki halinde
+    # '--allow-root' ve '--notebook-dir=...' fazladan girintiliydi; bash
+    # onlari AYRI KOMUT sandi ve su hatalari verdi:
+    #     /bin/bash: line 2: --allow-root: command not found
+    #     /bin/bash: line 3: --notebook-dir=...: No such file or directory
+    # Container exit 127 verdi. Cozum: komutu tek satirda tutmak.
+    #
+    # httpx pinlenmesi: jupyterlab 4.2.5 'proxies' argumanini kullaniyor,
+    # httpx >=0.28 bu argumani kaldirdi -> TypeError. Uyumlu surume sabitliyoruz.
+    command: ["/bin/bash", "-lc", "pip install --no-cache-dir 'httpx<0.28' jupyterlab==4.2.5 && exec jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password='' --notebook-dir=/opt/spark/notebooks"]
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./jobs:/opt/spark/jobs:ro
+      - ./tests:/opt/spark/tests:ro
+      - ./conf/spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./notebooks:/opt/spark/notebooks
+    depends_on: [spark-master]
+
+  # ==========================================================================
+  #  5. OLAP SERVIS KATMANI
+  # ==========================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.6
+    container_name: lh-clickhouse
+    depends_on:
+      nessie:
+        condition: service_started
+    environment:
+      # DIKKAT: CLICKHOUSE_USER / CLICKHOUSE_PASSWORD env degiskenleri
+      # BILEREK kullanilmiyor. Entrypoint bunlari gorunce
+      # /etc/clickhouse-server/users.d/default-user.xml dosyasini YAZMAYA
+      # calisir; biz o dizini :ro mount ettigimiz icin container "Read-only
+      # file system" hatasiyla exit 1 verir.
+      # Cozum: kullanici tanimi conf/clickhouse/users.d/analytics.xml
+      # icinde acikca yapiliyor. Boylece tanim surum kontrolunde ve
+      # dizin read-only kalabiliyor.
+      CLICKHOUSE_DB: ${CH_DB}
+      # Asagidakiler XML icinde from_env="..." ile okunuyor
+      CH_PASSWORD: ${CH_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      LAKEHOUSE_BUCKET: ${LAKEHOUSE_BUCKET}
+    ports:
+      - "8123:8123"   # HTTP  -> http://localhost:8123/play
+      - "9002:9000"   # Native (host'ta 9000 MinIO'da, o yuzden 9002)
+    volumes:
+      - ch-data:/var/lib/clickhouse
+      - ./conf/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./conf/clickhouse/users.d:/etc/clickhouse-server/users.d:ro
+      - ./sql/clickhouse:/sql:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    cap_add: [SYS_NICE, IPC_LOCK]
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user ${CH_USER} --password ${CH_PASSWORD} --query 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [lakehouse]
+
+  # ==========================================================================
+  #  6. ORKESTRASYON (opsiyonel)  ->  docker compose --profile orchestration up -d --build
+  # ==========================================================================
+  #  Varsayilan 'docker compose up' bu servisi BASLATMAZ. Cekirdek demo
+  #  Airflow'a bagimli degil; orkestrasyon uretim yolunu gostermek icin var.
+  airflow:
+    build:
+      context: ./docker/airflow
+      args:
+        AIRFLOW_VERSION: ${AIRFLOW_VERSION:-2.10.5}
+    image: csd/airflow:${AIRFLOW_VERSION:-2.10.5}
+    container_name: lh-airflow
+    profiles: [orchestration]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # ---- ROOT OLARAK CALISIYOR -- BILEREK, ve bedeli var ----
+    # DAG'lar Spark'a is gondermek icin docker soketini kullaniyor
+    # (gerekce: dags/csd_lakehouse_pipeline.py basligi). Soketi okuyabilmek
+    # icin container'in soket dosyasinin grubuna erisimi olmali; bu grup ID'si
+    # Docker Desktop / Linux / WSL arasinda DEGISIR ve tasinabilir degildir.
+    # Root en guvenilir yol -- ama root + docker soketi pratikte HOST'TA
+    # ROOT demektir. Bu YALNIZCA lokal referans kurulumu icin kabul edilebilir.
+    # Uretimde: KubernetesPodOperator / Spark on K8s; soket paylasmayin.
+    user: "0:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
+        postgresql+psycopg2://${PG_USER}:${PG_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      # 'standalone' her aciliste rastgele bir admin parolasi uretir ve
+      # AIRFLOW_HOME/standalone_admin_password.txt icine yazar. Sabit bir
+      # parola vererek demoyu tekrarlanabilir kiliyoruz.
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      # DAG'in kullandigi kimlik bilgileri -- DAG dosyasina GOMULMUYOR.
+      CH_USER: ${CH_USER}
+      CH_PASSWORD: ${CH_PASSWORD}
+      PG_USER: ${PG_USER}
+      PG_PASSWORD: ${PG_PASSWORD}
+      PG_DB: ${PG_DB}
+    ports:
+      - "8090:8080"   # Airflow UI -> http://localhost:8090  (8080 Spark'ta)
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - airflow-logs:/opt/airflow/logs
+      # Spark'a is gondermek icin (yukaridaki root notuna bakin)
+      - /var/run/docker.sock:/var/run/docker.sock
+    # 'standalone' = db migrate + admin kullanici + scheduler + webserver,
+    # tek komutta. Referans kurulum icin dogru odak; uretimde scheduler ve
+    # webserver AYRI servisler olmali (ayri olcekleme, ayri yeniden baslatma).
+    command: ["bash", "-c", "airflow db migrate && airflow standalone"]
+    restart: unless-stopped
+    networks: [lakehouse]
+
+networks:
+  lakehouse:
+    name: lakehouse
+    driver: bridge
+
+volumes:
+  pg-data:      # OLTP kaynak + Nessie version store + Airflow metadata
+  minio-data:   # Parquet + Iceberg metadata (asil veri)
+  ch-data:      # ClickHouse MergeTree (turetilmis, silinebilir)
+  airflow-logs: # Airflow gorev loglari (opsiyonel profil)

@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse <-> MinIO/Iceberg entegrasyon ayarlari.
+
+  named_collections: MinIO kimlik bilgilerini SQL metninden ayirir.
+  Sorgularda parola yazmak yerine:
+      SELECT * FROM s3(minio_lakehouse, path='...', format='Parquet')
+  denir. Kimlik bilgisi query_log'a, .sql dosyalarina, ekran goruntusune
+  sizmaz. Kurumsal denetimde aranan seylerden biri tam olarak budur.
+-->
+<clickhouse>
+
+    <!-- ====================================================================
+         LISTEN_HOST - SILMEYIN, bu blok olmadan ClickHouse'a HOST'TAN
+         ERISILEMEZ.
+
+         Sebep incedir: compose'da bu dizini
+             ./conf/clickhouse/config.d : /etc/clickhouse-server/config.d
+         seklinde KOMPLE mount ediyoruz. Bu, imajin kendi
+         'docker_related_config.xml' dosyasini EZER - ki ClickHouse'u
+         tum arayuzlerde dinlettiren dosya odur. O dosya gidince ClickHouse
+         yalnizca localhost'u dinler.
+
+         Belirti sinsi: container "healthy" gorunur (healthcheck container
+         ICINDEN calisir), clickhouse-client icerideyken calisir, ama
+         host'tan curl/tarayici baglanamaz - port haritasi dogru olsa bile.
+         Tam olarak bu tuzaga dustuk: http://localhost:8123/play acilmiyordu.
+
+         Alternatif cozum: dizin yerine dosyalari tek tek mount etmek.
+         Daha ayrintili ama imajin kendi config'lerini korur.
+         ==================================================================== -->
+    <listen_host>::</listen_host>
+    <listen_host>0.0.0.0</listen_host>
+    <listen_try>1</listen_try>
+
+    <named_collections>
+        <minio_lakehouse>
+            <url>http://minio:9000/lakehouse/</url>
+            <access_key_id from_env="MINIO_ROOT_USER"/>
+            <secret_access_key from_env="MINIO_ROOT_PASSWORD"/>
+            <region>us-east-1</region>
+        </minio_lakehouse>
+    </named_collections>
+
+    <!-- MinIO path-style adresleme kullanir (bucket.host degil host/bucket).
+         Bu blok olmadan ClickHouse virtual-host style dener ve DNS hatasi alir. -->
+    <s3>
+        <minio_endpoint>
+            <endpoint>http://minio:9000/lakehouse/</endpoint>
+            <access_key_id from_env="MINIO_ROOT_USER"/>
+            <secret_access_key from_env="MINIO_ROOT_PASSWORD"/>
+            <region>us-east-1</region>
+            <use_environment_credentials>false</use_environment_credentials>
+        </minio_endpoint>
+    </s3>
+
+    <!-- Uzak object storage okumalarinda tekrar eden metadata/veri
+         bloklarini lokal diskte tutar. Iceberg manifest dosyalari kucuk ve
+         sik okunur; bu cache OLAP gecikmesini belirgin dusurur. -->
+    <filesystem_caches>
+        <lake_cache>
+            <path>/var/lib/clickhouse/lake_cache/</path>
+            <max_size>10Gi</max_size>
+        </lake_cache>
+    </filesystem_caches>
+
+    <logger>
+        <level>information</level>
+    </logger>
+
+</clickhouse>

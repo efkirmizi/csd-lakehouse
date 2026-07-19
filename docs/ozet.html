@@ -1,0 +1,824 @@
+<title>CSD Data Lakehouse — Ölçüm Raporu</title>
+
+<style>
+  /* ===================================================================
+     TASARIM NOTU
+     Kimlik: "ölçüm aleti". Bu projenin tezi "tahmin etmedik, ölçtük"
+     olduğu için sayfa da bir enstrüman gibi davranıyor: her rakam
+     monospace, her ölçüm birimiyle, her iddia kaynağıyla birlikte.
+     Palet: derin teal (enstrüman), mavi-soğuk nötrler, ayrı semantik
+     renkler (doğrulandı / bilinen sınır / eski durum).
+     =================================================================== */
+
+  :root {
+    --paper:        #F4F6F7;
+    --surface:      #FFFFFF;
+    --surface-alt:  #EAEEF0;
+    --ink:          #0F1519;
+    --ink-soft:     #47535D;
+    --ink-faint:    #7E8A94;
+    --rule:         #D3DADE;
+    --rule-strong:  #B3BEC5;
+
+    --accent:       #0B6E77;
+    --accent-lift:  #0E8C97;
+    --accent-wash:  #E2EFF0;
+
+    --good:         #2E6F4E;
+    --good-wash:    #E1EFE7;
+    --warn:         #8A6112;
+    --warn-wash:    #F5EDDC;
+    --bad:          #9C3A2E;
+    --bad-wash:     #F6E4E1;
+
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+            Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", "JetBrains Mono",
+            Menlo, Consolas, "Liberation Mono", monospace;
+
+    --measure: 68ch;
+    --gap: clamp(1rem, 2.2vw, 1.75rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:       #0C1114;
+      --surface:     #131A1F;
+      --surface-alt: #1A232A;
+      --ink:         #E8EDF0;
+      --ink-soft:    #A3B0B9;
+      --ink-faint:   #6E7C86;
+      --rule:        #263139;
+      --rule-strong: #37454F;
+
+      --accent:      #3CB3BD;
+      --accent-lift: #5FCDD6;
+      --accent-wash: #10282B;
+
+      --good:        #6FC08D;
+      --good-wash:   #14261C;
+      --warn:        #D6A44B;
+      --warn-wash:   #2A2113;
+      --bad:         #E08375;
+      --bad-wash:    #2C1815;
+    }
+  }
+
+  :root[data-theme="light"] {
+    --paper:#F4F6F7; --surface:#FFFFFF; --surface-alt:#EAEEF0;
+    --ink:#0F1519; --ink-soft:#47535D; --ink-faint:#7E8A94;
+    --rule:#D3DADE; --rule-strong:#B3BEC5;
+    --accent:#0B6E77; --accent-lift:#0E8C97; --accent-wash:#E2EFF0;
+    --good:#2E6F4E; --good-wash:#E1EFE7;
+    --warn:#8A6112; --warn-wash:#F5EDDC;
+    --bad:#9C3A2E;  --bad-wash:#F6E4E1;
+  }
+
+  :root[data-theme="dark"] {
+    --paper:#0C1114; --surface:#131A1F; --surface-alt:#1A232A;
+    --ink:#E8EDF0; --ink-soft:#A3B0B9; --ink-faint:#6E7C86;
+    --rule:#263139; --rule-strong:#37454F;
+    --accent:#3CB3BD; --accent-lift:#5FCDD6; --accent-wash:#10282B;
+    --good:#6FC08D; --good-wash:#14261C;
+    --warn:#D6A44B; --warn-wash:#2A2113;
+    --bad:#E08375;  --bad-wash:#2C1815;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: clamp(2rem, 5vw, 4.5rem) clamp(1.1rem, 4vw, 3rem) 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(2.75rem, 6vw, 4.5rem);
+  }
+
+  .prose { max-width: var(--measure); }
+
+  /* ---------- tipografi ---------- */
+  h1, h2, h3 { text-wrap: balance; line-height: 1.18; }
+
+  h1 {
+    font-size: clamp(2rem, 5.2vw, 3.15rem);
+    font-weight: 680;
+    letter-spacing: -0.022em;
+    margin-bottom: .6rem;
+  }
+  h2 {
+    font-size: clamp(1.3rem, 2.6vw, 1.6rem);
+    font-weight: 640;
+    letter-spacing: -0.012em;
+  }
+  h3 {
+    font-size: 1.02rem;
+    font-weight: 640;
+    letter-spacing: -0.004em;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .69rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: .7rem;
+  }
+
+  .lede {
+    font-size: clamp(1.03rem, 1.9vw, 1.2rem);
+    color: var(--ink-soft);
+    max-width: var(--measure);
+  }
+
+  p { margin: 0; }
+  .stack { display: flex; flex-direction: column; gap: 1rem; }
+  .stack-tight { display: flex; flex-direction: column; gap: .55rem; }
+
+  section { display: flex; flex-direction: column; gap: 1.4rem; }
+
+  .rule-top { border-top: 1px solid var(--rule); padding-top: 1.6rem; }
+
+  /* ---------- künye şeridi ---------- */
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.6rem;
+    font-family: var(--mono);
+    font-size: .74rem;
+    color: var(--ink-faint);
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    padding: .75rem 0;
+  }
+  .meta b { color: var(--ink-soft); font-weight: 500; }
+
+  /* ---------- manşet ölçüm ---------- */
+  .headline {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    padding: clamp(1.25rem, 3vw, 2rem);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 1.5rem clamp(1rem, 3vw, 2.5rem);
+    align-items: end;
+  }
+  .measure-label {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: block;
+    margin-bottom: .3rem;
+  }
+  .measure-value {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(1.5rem, 3.6vw, 2.2rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+  }
+  .measure-value small {
+    font-size: .48em;
+    font-weight: 500;
+    color: var(--ink-faint);
+    letter-spacing: 0;
+  }
+  .v-before { color: var(--bad); }
+  .v-after  { color: var(--good); }
+  .v-ratio  { color: var(--accent); }
+
+  /* ---------- tablolar ---------- */
+  .tablewrap {
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+  }
+  table { border-collapse: collapse; width: 100%; font-size: .875rem; }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: .8rem 1rem .55rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  th, td {
+    padding: .62rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: baseline;
+  }
+  thead th {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    background: var(--surface-alt);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num, th.num {
+    text-align: right;
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  tr.accent-row td { background: var(--accent-wash); font-weight: 600; }
+  tr.accent-row td.num { color: var(--accent); }
+
+  /* ---------- rozetler ---------- */
+  .tag {
+    font-family: var(--mono);
+    font-size: .67rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    padding: .16rem .48rem;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+    display: inline-block;
+  }
+  .t-good { color: var(--good);   background: var(--good-wash); }
+  .t-warn { color: var(--warn);   background: var(--warn-wash); }
+  .t-bad  { color: var(--bad);    background: var(--bad-wash); }
+
+  /* ---------- bulgu kartları ---------- */
+  .findings { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .finding {
+    background: var(--surface);
+    padding: 1.15rem clamp(1rem, 2.5vw, 1.5rem);
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: .5rem 1rem;
+    align-items: start;
+  }
+  .finding .fid {
+    font-family: var(--mono);
+    font-size: .8rem;
+    font-weight: 600;
+    color: var(--accent);
+    padding-top: .1rem;
+  }
+  .finding h3 { margin: 0; }
+  .finding .fbody { grid-column: 2; color: var(--ink-soft); font-size: .93rem; }
+  .finding .fbody strong { color: var(--ink); font-weight: 600; }
+
+  /* ---------- uyarı bloğu ---------- */
+  .callout {
+    background: var(--warn-wash);
+    border: 1px solid var(--warn);
+    border-left-width: 3px;
+    padding: clamp(1rem, 2.5vw, 1.4rem);
+    display: flex;
+    flex-direction: column;
+    gap: .7rem;
+  }
+  .callout h3 { color: var(--warn); }
+  .callout p { color: var(--ink-soft); font-size: .93rem; }
+  .callout strong { color: var(--ink); }
+
+  /* ---------- alıntı ---------- */
+  blockquote {
+    border-left: 2px solid var(--accent);
+    padding: .1rem 0 .1rem 1.15rem;
+    color: var(--ink-soft);
+    font-size: 1.02rem;
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: .86em;
+    background: var(--surface-alt);
+    padding: .08em .34em;
+    color: var(--ink);
+  }
+
+  ul { padding-left: 1.15rem; display: flex; flex-direction: column; gap: .45rem; }
+  li { color: var(--ink-soft); }
+  li strong { color: var(--ink); }
+
+  .mermaid {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    padding: 1.25rem;
+    overflow-x: auto;
+    text-align: center;
+  }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.3rem;
+    font-family: var(--mono);
+    font-size: .74rem;
+    color: var(--ink-faint);
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+  }
+
+  @media (max-width: 560px) {
+    .finding { grid-template-columns: 1fr; }
+    .finding .fbody { grid-column: 1; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="stack">
+    <div>
+      <span class="eyebrow">Mühendislik Değerlendirmesi · Referans Kurulum</span>
+      <h1>CSD Data Lakehouse</h1>
+      <p class="lede">
+        MinIO · Apache Iceberg · Project Nessie · PySpark · ClickHouse ile kurulan
+        uçtan uca lakehouse mimarisinin <strong>ölçülmüş</strong> sonuçları.
+        Bu sayfadaki her rakam <code>system.query_log</code> ve iş çıktılarından
+        alınmıştır — hiçbiri tahmin değildir.
+      </p>
+    </div>
+
+    <div class="meta">
+      <span><b>Veri hacmi</b> 20.000.000 işlem</span>
+      <span><b>Ortam</b> lokal Docker, tek makine</span>
+      <span><b>Kaynak</b> system.query_log</span>
+      <span><b>Durum</b> kanıt kurulumu — üretim değil</span>
+    </div>
+  </header>
+
+  <!-- =============== MANŞET =============== -->
+  <section>
+    <div>
+      <span class="eyebrow">Manşet ölçüm</span>
+      <h2>Aynı yönetim raporu sorusu, üç farklı katman</h2>
+    </div>
+
+    <div class="headline">
+      <div>
+        <span class="measure-label">Bugünkü yol — PostgreSQL</span>
+        <div class="measure-value v-before">15.414 <small>ms</small></div>
+      </div>
+      <div>
+        <span class="measure-label">Lakehouse — Gold özet</span>
+        <div class="measure-value v-after">10 <small>ms</small></div>
+      </div>
+      <div>
+        <span class="measure-label">Hızlanma</span>
+        <div class="measure-value v-ratio">1.541<small>×</small></div>
+      </div>
+    </div>
+
+    <p class="prose">
+      Soru şu: <em>“2025'in ilk çeyreğinde, hisse tipindeki kıymetlerde kanal bazında
+      toplam işlem hacmi ve tekil yatırımcı sayısı nedir?”</em> Dashboard her
+      açıldığında çalışan, sıradan bir rapor sorusu.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <caption>Tek sorgu · 20M satır · önbellek boş</caption>
+        <thead>
+          <tr>
+            <th>Katman</th>
+            <th class="num">Süre</th>
+            <th class="num">Okunan satır</th>
+            <th class="num">Okunan veri</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>PostgreSQL (bugünkü yol)</td>
+            <td class="num">15.414 ms</td>
+            <td class="num">2,45 M</td>
+            <td class="num">114 MiB</td>
+          </tr>
+          <tr>
+            <td>ClickHouse → Iceberg (federe, kopyasız)</td>
+            <td class="num">198 ms</td>
+            <td class="num">1,38 M</td>
+            <td class="num">45 MiB</td>
+          </tr>
+          <tr>
+            <td>ClickHouse → MergeTree (detay tablosu)</td>
+            <td class="num">83 ms</td>
+            <td class="num">2,37 M</td>
+            <td class="num">47 MiB</td>
+          </tr>
+          <tr class="accent-row">
+            <td>ClickHouse → Gold özet (ön-toplanmış)</td>
+            <td class="num">10 ms</td>
+            <td class="num">115 k</td>
+            <td class="num">3 MiB</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="prose">
+      Süreye değil <strong>okunan satıra</strong> bakın — hikâye orada.
+      Sorgu hızlı, çünkü az veri okuyor. Bu cümle ölçek büyüdüğünde de geçerli
+      kalır; saniye rakamları kalmaz.
+    </p>
+  </section>
+
+  <!-- =============== ÖLÇEK =============== -->
+  <section class="rule-top">
+    <div>
+      <span class="eyebrow">Ölçek testi</span>
+      <h2>Veri 10 kat büyüdüğünde makas açılıyor mu?</h2>
+    </div>
+
+    <p class="prose">
+      Bu, dokümanda başlangıçta <em>ölçülmemiş bir beklenti</em> olarak yazılmıştı.
+      Ölçüldü. Aynı sorgu, aynı makine, veri hacmi 2M → 20M:
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <caption>Ölçekle değişim</caption>
+        <thead>
+          <tr>
+            <th>Katman</th>
+            <th class="num">2M satır</th>
+            <th class="num">20M satır</th>
+            <th class="num">Değişim</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>PostgreSQL</td>
+            <td class="num">1.034 ms</td>
+            <td class="num">15.414 ms</td>
+            <td class="num" style="color:var(--bad)">14,9× kötü</td>
+          </tr>
+          <tr class="accent-row">
+            <td>Gold özet</td>
+            <td class="num">8 ms</td>
+            <td class="num">10 ms</td>
+            <td class="num">1,25× — sabit</td>
+          </tr>
+          <tr>
+            <td>Hızlanma oranı</td>
+            <td class="num">129×</td>
+            <td class="num">1.541×</td>
+            <td class="num">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="prose">
+      PostgreSQL <strong>superlineer</strong> kötüleşiyor: 10 kat veri, 15 kat süre.
+      Ön-toplanmış gold katmanı ise pratikte sabit kalıyor — özet tablo 24 binden
+      939 bin satıra büyürken sorgunun <em>okuduğu</em> satır 115 binde kalıyor.
+      Beklenti doğrulandı ve gerçek rakam tahminden büyük çıktı.
+    </p>
+  </section>
+
+  <!-- =============== EŞZAMANLILIK =============== -->
+  <section class="rule-top">
+    <div>
+      <span class="eyebrow">Eşzamanlı yük</span>
+      <h2>Asıl mimari kanıt: 50 kullanıcı aynı anda</h2>
+    </div>
+
+    <p class="prose">
+      Tek kullanıcı rakamları yanıltıcıdır. Dashboard'a 50 kişi aynı anda girdiğinde
+      tablo tamamen değişiyor:
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <caption>50 eşzamanlı kullanıcı · 300 sorgu · 20M satır</caption>
+        <thead>
+          <tr>
+            <th>Ölçüt</th>
+            <th class="num">Iceberg (federe)</th>
+            <th class="num">MergeTree (gold)</th>
+            <th class="num">Fark</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>QPS (saniyedeki sorgu)</td><td class="num">49</td><td class="num">211</td><td class="num">4,3×</td></tr>
+          <tr><td>P50</td><td class="num">918 ms</td><td class="num">160 ms</td><td class="num">5,7×</td></tr>
+          <tr><td>P95</td><td class="num">1.374 ms</td><td class="num">343 ms</td><td class="num">4,0×</td></tr>
+          <tr class="accent-row"><td>P99</td><td class="num">1.559 ms</td><td class="num">426 ms</td><td class="num">3,7×</td></tr>
+          <tr><td>P99.9</td><td class="num">1.842 ms</td><td class="num">469 ms</td><td class="num">3,9×</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <blockquote>
+      Sunumda ortalama değil <strong>P99</strong> konuşun. “Ortalama 130 ms” bir
+      taahhüt değildir; <em>“50 eşzamanlı kullanıcıda sorguların %99'u 426 ms
+      altında”</em> taahhüttür. Yöneticiler SLA diliyle düşünür.
+    </blockquote>
+
+    <p class="prose">
+      Materyalizasyonun gerekçesi burada. Tek sorguda federe okuma 198 ms — yani
+      zaten sub-second, ve “materyalizasyon gereksiz mi?” sorusu haklı.
+      50 kullanıcıda federe yol <strong>saniyeyi kırıyor</strong>; MergeTree 426 ms'de
+      kalıyor. Eşzamanlılıkta da makas ölçekle açılıyor: 2M'de P99 farkı 2,8×, 20M'de 3,7×.
+    </p>
+
+    <div class="callout">
+      <h3>Sunumda söylenmemesi gereken cümle</h3>
+      <p>
+        <strong>“ClickHouse olmadan sorgular saniyeler sürer.”</strong>
+        Bu yanlış — biri çıkıp federe görünüme sorgu atar, 198 ms alır ve
+        anlattığınız her şey şüpheli hale gelir. Doğru çerçeve:
+        <em>bugünkü PostgreSQL yolu 15 saniye; lakehouse'ta aynı soru 10 milisaniye.
+        Materyalizasyonu temel hız için değil, yük altında taahhüt verebilmek için
+        yapıyoruz.</em>
+      </p>
+    </div>
+  </section>
+
+  <!-- =============== MİMARİ =============== -->
+  <section class="rule-top">
+    <div>
+      <span class="eyebrow">Mimari</span>
+      <h2>Üç ayrı sorumluluk, üç ayrı bileşen</h2>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Katman</th><th>Cevapladığı soru</th><th>Bileşen</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Fiziksel depolama</td><td>Baytlar nerede?</td><td><strong>MinIO</strong> — S3 API, Parquet</td></tr>
+          <tr><td>Tablo formatı</td><td>Bu baytlar nasıl bir tablo?</td><td><strong>Iceberg</strong> — metadata, snapshot, şema</td></tr>
+          <tr><td>Katalog</td><td>Şu anki tablo hangi metadata?</td><td><strong>Nessie</strong> — pointer + versiyon</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <pre class="mermaid">
+flowchart TB
+  PG[("PostgreSQL&lt;br/&gt;OLTP kaynak")]
+  SP["PySpark&lt;br/&gt;WAP: branch → doğrula → merge"]
+  NS["Project Nessie&lt;br/&gt;katalog + versiyonlama"]
+  MIO[("MinIO / S3&lt;br/&gt;Parquet + Iceberg metadata")]
+  GO["gold&lt;br/&gt;ön-toplanmış"]
+  MT["ClickHouse MergeTree&lt;br/&gt;sıcak katman"]
+  FED["Federe okuma&lt;br/&gt;kopyasız"]
+  BI["Dashboard / SLA'lı iş"]
+  DS["Veri bilimci / keşif"]
+
+  PG --&gt;|"JDBC paralel okuma"| SP
+  SP --&gt;|"tablo pointer'ı"| NS
+  SP --&gt;|"Parquet yazımı"| MIO
+  NS -.-&gt;|"pointer çözümleme"| MIO
+  MIO --&gt; GO
+  GO --&gt;|"materyalizasyon"| MT
+  GO --&gt; FED
+  MT --&gt; BI
+  FED --&gt; DS
+    </pre>
+
+    <p class="prose">
+      Kritik ayrım: MinIO'ya bakan biri yalnızca klasörler ve Parquet dosyaları
+      görür — hangi dosyanın hangi tabloya ait olduğunu bilemez. O bilgi Iceberg
+      metadata'sındadır. Tablonun <em>şu anki</em> halinin hangi metadata olduğu ise
+      Nessie'dedir.
+    </p>
+
+    <h3>Nessie neden var? — veri katalogunun Git'i</h3>
+    <ul>
+      <li><strong>Branch açmak 0 byte kopyalar.</strong> Yalnızca yeni bir pointer kümesi oluşur; 2 milyar satırlık katalogda da milisaniye sürer.</li>
+      <li><strong>İzolasyon tablo değil katalog seviyesindedir.</strong> 5 tabloyu tutarlı biçimde birlikte yayınlamak Iceberg branch'iyle olmaz, Nessie ile olur.</li>
+      <li><strong>Merge tek atomik commit'tir.</strong> Okuyucu ya tüm değişikliği görür ya hiçbirini — “yarım yüklenmiş rapor” durumu oluşmaz.</li>
+    </ul>
+  </section>
+
+  <!-- =============== SENARYOLAR =============== -->
+  <section class="rule-top">
+    <div>
+      <span class="eyebrow">Kanıt senaryoları</span>
+      <h2>Altı senaryo, 20M satır üzerinde çalıştırıldı</h2>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>#</th><th>Senaryo</th><th>Ölçülen sonuç</th><th>Durum</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="num">1</td><td>Time travel + rollback</td>
+            <td>20M satır ×100 bozuldu → <strong>5,49 sn</strong>'de birebir geri geldi; bozuk snapshot denetim izinde korundu</td>
+            <td><span class="tag t-good">Geçti</span></td>
+          </tr>
+          <tr>
+            <td class="num">2</td><td>Nessie branching (WAP)</td>
+            <td>Branch'te 50.000 bozuk satır; main değişmedi, kalite kontrolü yakaladı, merge engellendi</td>
+            <td><span class="tag t-good">Geçti</span></td>
+          </tr>
+          <tr>
+            <td class="num">3</td><td>Performans (3 katman)</td>
+            <td>15.414 ms → 10 ms · <strong>1.541×</strong></td>
+            <td><span class="tag t-good">Geçti</span></td>
+          </tr>
+          <tr>
+            <td class="num">4</td><td>Şema evrimi</td>
+            <td>3 sütun <strong>0,71 sn</strong>, <strong>0 bayt</strong> yeniden yazıldı; partition evrimi 0,25 sn</td>
+            <td><span class="tag t-good">Geçti</span></td>
+          </tr>
+          <tr>
+            <td class="num">5</td><td>Mutabakat (OLTP ↔ Lakehouse)</td>
+            <td><strong>10.384.619</strong> pozisyon, <strong>0 fark</strong>, iki yönde 0 kayıp kayıt, toplamlar birebir</td>
+            <td><span class="tag t-good">Geçti</span></td>
+          </tr>
+          <tr>
+            <td class="num">6</td><td>ClickHouse branch izolasyonu</td>
+            <td>Federe görünümler branch izolasyonunu görmüyor — aşağıya bakın</td>
+            <td><span class="tag t-warn">Sınır bulundu</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Senaryo 5 neden en önemlisi olabilir</h3>
+    <p class="prose">
+      Düzenlemeye tabi bir kurumda yeni bir analitik platformun önündeki en büyük
+      engel hız değil <strong>güven</strong>dir. İlk soru her zaman şudur:
+      <em>“Bu sistemin ürettiği rakamın doğru olduğuna nasıl güveneceğiz?”</em>
+      Mutabakat senaryosu bu soruya sayısal cevap verir: kaynak sistemin kendi
+      pozisyon kaydı ile lakehouse'un işlem hareketlerinden <em>bağımsız olarak
+      türettiği</em> pozisyon karşılaştırılır. 10,4 milyon çiftte fark sıfır.
+      Ve bu, tek sorguyla, her gün otomatik çalıştırılabilir bir kontroldür.
+    </p>
+  </section>
+
+  <!-- =============== BULGULAR =============== -->
+  <section class="rule-top">
+    <div>
+      <span class="eyebrow">Ölçmenin getirisi</span>
+      <h2>Ölçek testinde ortaya çıkan dört gerçek hata</h2>
+    </div>
+
+    <p class="prose">
+      Bunların üçü 2 milyon satırda <strong>görünmüyordu</strong>. Ölçek testinin
+      asıl değeri performans rakamları değil, bunları bulmuş olması.
+    </p>
+
+    <div class="findings">
+      <div class="finding">
+        <span class="fid">01</span>
+        <h3>Yarım kalan kurulum sessizce “sağlıklı” görünüyordu</h3>
+        <p class="fbody">
+          Seed yarıda kesilince PostgreSQL yeniden başlarken init'i <strong>atlıyor</strong>
+          ve yarım bir şema bırakıyor: satırlar yerinde, indeksler ve istatistikler yok.
+          Container “healthy” diyor. Fark edilmeseydi <strong>PostgreSQL'i haksız yere
+          yavaş gösterecekti</strong> — yani karşılaştırmayı bozacaktı.
+          Çözüm: idempotent onarım scripti + sağlık kontrolüne şema bütünlüğü eklendi.
+        </p>
+      </div>
+
+      <div class="finding">
+        <span class="fid">02</span>
+        <h3>Katalog servisi, veritabanı açılmadan pes ediyordu</h3>
+        <p class="fbody">
+          Nessie'nin yeniden deneme bütçesi ~30 saniyede tükeniyordu; 20M satırlık
+          veritabanının çökme sonrası kurtarması <strong>35 saniye</strong> sürdü.
+          Docker daemon'ı yeniden başlattığında bağımlılık sırası da geçerli olmadığı
+          için stack yarım ayağa kalkıyordu: hesaplama ve sorgu katmanı ayakta,
+          <strong>katalog yok</strong>. Çözüm: sınırsız yeniden deneme.
+        </p>
+      </div>
+
+      <div class="finding">
+        <span class="fid">03</span>
+        <h3>İki sistem aynı sayıyı veriyordu ama aynı tanımı kullanmıyordu</h3>
+        <p class="fbody">
+          Kaynak sistem, kapanmış (net sıfır) pozisyonları pozisyon tablosuna
+          <em>almıyor</em>; lakehouse alıyordu. 2M satırda hiçbir çift tam sıfıra
+          kapanmadığı için ikisi birebir tutuyor ve fark <strong>görünmüyordu</strong>.
+          20M'de 2 satır ayrıştı. <strong>Ders:</strong> aynı sayıyı vermek, aynı tanımı
+          kullanmak demek değildir; küçük veride örtüşen tanım farkları büyük veride ayrışır.
+        </p>
+      </div>
+
+      <div class="finding">
+        <span class="fid">04</span>
+        <h3>İzolasyon garantisi servis katmanında geçerli değildi</h3>
+        <p class="fbody">
+          En ciddi bulgu. ClickHouse bu sürüm çiftinde katalogdan okuyamadığı için
+          doğrudan depolama yolunu okuyor — ve katalogu atladığı için
+          <strong>Nessie'nin branch izolasyonunu görmüyor.</strong> Yani
+          “doğrulanmamış veri üretime ulaşmaz” garantisi hesaplama katmanında
+          geçerli, servis katmanında değil. Detay aşağıda.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- =============== SINIR =============== -->
+  <section class="rule-top">
+    <div>
+      <span class="eyebrow">Bilinen sınır</span>
+      <h2>Federe görünümler branch izolasyonunu görmüyor</h2>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <caption>Ölçülen davranış · gold.araci_kurum_gunluk</caption>
+        <thead>
+          <tr><th>Adım</th><th class="num">Spark (main)</th><th class="num">Spark (branch)</th><th class="num">ClickHouse</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Başlangıç</td><td class="num">125.277</td><td class="num">—</td><td class="num">125.277</td></tr>
+          <tr><td>Branch'e 1.000 satır yazıldı</td><td class="num">125.277</td><td class="num">126.277</td><td class="num" style="color:var(--bad)">126.277</td></tr>
+          <tr><td>Branch silindi</td><td class="num">125.277</td><td class="num">—</td><td class="num" style="color:var(--bad)">126.277</td></tr>
+          <tr class="accent-row"><td>main'e yeni commit</td><td class="num">125.277</td><td class="num">—</td><td class="num">125.277</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <h3>Tehlike penceresi tam olarak nerede?</h3>
+      <p>
+        <strong>Başarılı ETL'de sorun kendini toplar</strong> — merge, ana dala yeni bir
+        commit attığı için görünümler doğru veriye döner. Asıl risk
+        <strong>kalite kontrolü patladığında</strong> ortaya çıkıyor: yani tam da
+        Write-Audit-Publish'in koruması gereken anda. Merge edilmemiş, reddedilmiş
+        veri federe görünümlerde görünür kalıyor — ve branch'i silmek bunu düzeltmiyor.
+      </p>
+      <p>
+        <strong>Bu yüzden:</strong> SLA'lı iş ve dashboard'lar materyalize katmandan
+        beslenmeli; federe görünümler keşif içindir. Kalıcı çözüm ClickHouse'un
+        katalog bağlantısının düzelmesidir — bu mimarideki <strong>en değerli tek
+        iyileştirme</strong>.
+      </p>
+    </div>
+
+    <p class="prose">
+      Bariz görünen çözüm de denendi ve <strong>çalışmadı</strong>: görünümü belirli bir
+      snapshot'a sabitleme ayarı sorgu seviyesinde çalışıyor, ancak görünüm içinde
+      uygulanmıyor — ClickHouse ayarı saklıyor ve tanımda gösteriyor, ama sorguda
+      dikkate almıyor. Bu yüzden özellik <em>eklenmedi</em>: çalışmayan ama çalışıyor
+      görünen bir güvenlik anahtarı, hiç olmamasından tehlikelidir.
+    </p>
+  </section>
+
+  <!-- =============== ÜRETİM =============== -->
+  <section class="rule-top">
+    <div>
+      <span class="eyebrow">Dürüstlük bölümü</span>
+      <h2>Üretime giderken eksik olanlar</h2>
+    </div>
+
+    <p class="prose">
+      Bu bir lokal referans kurulumudur. “Her şey hazır” demek yerine
+      “çekirdek mimari kanıtlandı, üretim için şunlar gerekli” demek —
+      stajyer sunumu ile mühendis sunumu arasındaki fark budur.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Konu</th><th>Bu kurulumda</th><th>Üretimde gereken</th></tr></thead>
+        <tbody>
+          <tr><td>Kimlik doğrulama</td><td>Yok</td><td>OIDC / Keycloak; Nessie ve MinIO'da</td></tr>
+          <tr><td>Yetkilendirme</td><td>Yok</td><td>Katalog authz + IAM policy; sütun/satır maskeleme</td></tr>
+          <tr><td>Sırlar</td><td>Düz metin dosya</td><td>Vault / K8s Secrets</td></tr>
+          <tr><td>Şifreleme</td><td>Yok</td><td>Her uçta TLS; at-rest SSE-KMS</td></tr>
+          <tr><td>Orkestrasyon</td><td>Manuel çalıştırma</td><td>Airflow / Dagster; retry, SLA, alarm</td></tr>
+          <tr><td>Kaynak yakalama</td><td>JDBC toplu okuma</td><td>Debezium CDC → Kafka → streaming</td></tr>
+          <tr><td>Yüksek erişilebilirlik</td><td>Her şey tek node</td><td>Dağıtık MinIO, replikalı ClickHouse, çok replikalı Nessie</td></tr>
+          <tr><td>İzleme</td><td>Yok</td><td>Prometheus + Grafana; Spark history server</td></tr>
+          <tr><td>ClickHouse ↔ katalog</td><td>Katalogu atlıyor</td><td>Çalışan REST katalog bağlantısı</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Bu mimarinin çözmediği şeyler</h3>
+    <ul>
+      <li><strong>Gerçek zamanlı değildir.</strong> Batch ETL + periyodik materyalizasyon. Milisaniyelik gecikme gerekiyorsa akış mimarisi gerekir.</li>
+      <li><strong>Küçük veride aşırı mühendisliktir.</strong> 50 GB'lık bir problem için doğru indekslenmiş tek bir PostgreSQL yeter.</li>
+      <li><strong>Operasyonel yük getirir.</strong> Beş bileşen, beş ayrı hata kaynağı. Bakım yapılmazsa altı ayda bozulur.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>CSD Data Lakehouse — mühendislik stajı sırasında geliştirilen öğrenme projesi</span>
+    <span>Tüm rakamlar 20.000.000 satırlık sentetik veri kümesi üzerinde, lokal Docker ortamında ölçülmüştür.</span>
+    <span>Bu bir referans/kanıt kurulumudur; herhangi bir kurumun resmî dokümanı veya üretim onayı değildir. Veri tamamen sentetiktir.</span>
+  </footer>
+
+</div>

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/Emir/.claude/plugins/**)",
+      "Read(//c/Users/Emir/.claude/**)",
+      "Bash(node -e \"try{const j=require\\(require\\('os'\\).homedir\\(\\)+'/.claude.json'\\);console.log\\(JSON.stringify\\(j.enabledPlugins||'\\(none\\)',null,2\\)\\)}catch\\(e\\){console.log\\('err',e.message\\)}\")",
+      "Bash(docker --version)",
+      "Bash(docker compose *)"
+    ]
+  }
+}
