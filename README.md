@@ -582,7 +582,7 @@ Tam gerekçelerle: [`docs/01-mimari.md` §8](docs/01-mimari.md).
 
 ## 📄 Lisans
 
-[MIT](LICENSE) — Copyright © 2026 Emir.
+[MIT](LICENSE) — Copyright © 2026 Enis Furkan Kırmızı.
 Veri tamamen sentetiktir; proje herhangi bir kurumu temsil etmez.
 
 <div align="center">
